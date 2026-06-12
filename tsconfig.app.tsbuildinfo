@@ -1,1 +1,1 @@
-{"root":["./src/FluidV3Material.ts","./src/main.tsx","./src/vite-env.d.ts"],"version":"5.8.3"}
+{"root":["./src/fluidmaterialgpu.ts","./src/fluidv3material.ts","./src/main-web-gpu.ts","./src/main-webgl.ts","./src/main.tsx","./src/vite-env.d.ts","./src/gpu/pingpongtexture.ts","./src/gpu/constants.ts","./src/gpu/shaders.ts","./src/gpu/types.ts","./src/webgl/pingpongtarget.ts","./src/webgl/constants.ts","./src/webgl/displacement.ts","./src/webgl/shaders.ts","./src/webgl/types.ts"],"version":"5.8.3"}
