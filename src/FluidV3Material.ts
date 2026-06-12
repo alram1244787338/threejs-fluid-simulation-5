@@ -23,8 +23,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 import GUI from "three/examples/jsm/libs/lil-gui.module.min.js";
-import { Color, ColorRepresentation, DataTexture, FloatType, Mesh, MeshPhysicalMaterial, Object3D, Raycaster, RGBAFormat, ShaderMaterial, Vector2, Vector3, WebGLRenderer, WebGLRenderTarget, type WebGLProgramParametersWithUniforms } from "three";
+import { Color, ColorRepresentation, DataTexture, FloatType, Mesh, MeshPhysicalMaterial, Object3D, RGBAFormat, ShaderMaterial, Vector2, WebGLRenderer, WebGLRenderTarget, type WebGLProgramParametersWithUniforms } from "three";
 import { FullScreenQuad } from "three/examples/jsm/Addons.js";
+import { FluidSettingRanges, FluidSettings, FluidSimulation, FluidSimulationBackend, installSettingsAccessors } from "./fluid/FluidSimulation";
 
 /**
  * R - Pressure
@@ -43,7 +44,7 @@ const vertexShader = `
 
                 void main() {
                     vUv = uv;
-                    
+
                     vL = uv - vec2(texelSize.x, 0.0);
                     vR = uv + vec2(texelSize.x, 0.0);
                     vT = uv + vec2(0.0, texelSize.y);
@@ -87,9 +88,9 @@ class SplatShader extends ShaderMaterial {
                 splatVelocity: { value:false },
                 color: { value: new Color(0xffffff) },
                 texelSize: { value: texelSize },
-                objectData: { value: null }, // Contains current and previous object positions 
-                objectPosition: { value: null }, // Contains current and previous object positions 
-                count: { value: objectCount }, 
+                objectData: { value: null }, // Contains current and previous object positions
+                objectPosition: { value: null }, // Contains current and previous object positions
+                count: { value: objectCount },
                 thickness: { value: 1 }, // in UV units
                 aspectRatio: { value:aspectRatio } // in UV units
                 , splatForce: { value: -196 }
@@ -100,11 +101,11 @@ class SplatShader extends ShaderMaterial {
                 precision mediump float;
                 precision mediump sampler2D;
 
-                varying highp vec2 vUv; 
+                varying highp vec2 vUv;
                 uniform sampler2D uTarget;
                 uniform sampler2D objectData; //color + ratio
                 uniform sampler2D objectPosition; // current + old uv positions
-                uniform int count; 
+                uniform int count;
                 uniform float thickness; //TODO: this shold be individual per object to allow diferent types of bodies affecting the liquid
                 uniform float aspectRatio;
                 uniform highp vec2 texelSize;
@@ -112,9 +113,9 @@ class SplatShader extends ShaderMaterial {
                 uniform vec3 color;
                 uniform float splatForce;
 
-                void main () { 
+                void main () {
 
-                    vec4 pixel = texture2D(uTarget, vUv);  
+                    vec4 pixel = texture2D(uTarget, vUv);
 
                     // Add External Forces (from objects)
                     // IMPROVEMENT: This loop is much more efficient as it reads from a texture.
@@ -128,7 +129,7 @@ class SplatShader extends ShaderMaterial {
                         float ratio = data.a * thickness;
 
                         vec2 diff = curr - prev;
-                        if (length(diff) == 0.0) continue; // Skip if the object hasn't moved 
+                        if (length(diff) == 0.0) continue; // Skip if the object hasn't moved
 
                         vec2 toFrag = vUv - prev;
                         float t = clamp(dot(toFrag, diff) / dot(diff, diff), 0.0, 1.0);
@@ -148,21 +149,21 @@ class SplatShader extends ShaderMaterial {
                             {
 
                                 vec2 vel = normalize( ( diff )/texelSize ) * -splatForce;
-                                
+
 
                                 //vel = mix( pixel.gb, vel, influence );
 
                                 pixel.g = vel.x;
                                 pixel.b = vel.y;
                             }
-                            else 
+                            else
                             {
 
                                 pixel = mix( pixel, vec4( data.rgb, 1.0 ), influence );
                             }
- 
+
                         }
-                    } 
+                    }
 
                     gl_FragColor = pixel;
                 }
@@ -236,7 +237,7 @@ class VorticityShader extends ShaderMaterial {
                 varying vec2 vR;
                 varying vec2 vT;
                 varying vec2 vB;
-                uniform sampler2D uVelocityAndCurl; 
+                uniform sampler2D uVelocityAndCurl;
                 uniform float curl;
                 uniform float dt;
 
@@ -256,9 +257,9 @@ class VorticityShader extends ShaderMaterial {
 
                     vec2 velocity = pixel.gb;
                     velocity += force * dt;
-                    velocity = min(max(velocity, -1000.0), 1000.0);  
+                    velocity = min(max(velocity, -1000.0), 1000.0);
 
-                    gl_FragColor = vec4( pixel.r, velocity, 0.0 ); 
+                    gl_FragColor = vec4( pixel.r, velocity, 0.0 );
                 }
             `
         })
@@ -273,7 +274,7 @@ class DivergenceShader extends ShaderMaterial {
         super({
             uniforms: {
                 uVelocity: { value: null },
-                texelSize: { value: texelSize }, 
+                texelSize: { value: texelSize },
             },
             vertexShader,
             fragmentShader:`
@@ -319,7 +320,7 @@ class ClearShader extends ShaderMaterial {
             uniforms: {
                 uTexture: { value: null },
                 value: { value: 0.317 }, //PRESSURE
-                texelSize: { value: texelSize }, 
+                texelSize: { value: texelSize },
             },
             vertexShader,
             fragmentShader:`
@@ -349,8 +350,8 @@ class PressureShader extends ShaderMaterial {
     constructor( texelSize:Vector2 ) {
         super({
             uniforms: {
-                uPressureWithDivergence: { value: null }, 
-                texelSize: { value: texelSize }, 
+                uPressureWithDivergence: { value: null },
+                texelSize: { value: texelSize },
             },
             vertexShader,
             fragmentShader:`
@@ -362,7 +363,7 @@ class PressureShader extends ShaderMaterial {
                 varying highp vec2 vR;
                 varying highp vec2 vT;
                 varying highp vec2 vB;
-                uniform sampler2D uPressureWithDivergence; 
+                uniform sampler2D uPressureWithDivergence;
 
                 void main () {
                     float L = texture2D(uPressureWithDivergence, vL).x;
@@ -377,7 +378,7 @@ class PressureShader extends ShaderMaterial {
 
                     pixel.x = pressure;
 
-                    gl_FragColor = pixel;  
+                    gl_FragColor = pixel;
                 }
             `
         })
@@ -389,8 +390,8 @@ class GradientSubtractShader extends ShaderMaterial {
     constructor( texelSize:Vector2 ) {
         super({
             uniforms: {
-                uPressureWithVelocity: { value: null }, 
-                texelSize: { value: texelSize }, 
+                uPressureWithVelocity: { value: null },
+                texelSize: { value: texelSize },
             },
             vertexShader,
             fragmentShader:`
@@ -402,7 +403,7 @@ class GradientSubtractShader extends ShaderMaterial {
                 varying highp vec2 vR;
                 varying highp vec2 vT;
                 varying highp vec2 vB;
-                uniform sampler2D uPressureWithVelocity; 
+                uniform sampler2D uPressureWithVelocity;
 
                 void main () {
                     float L = texture2D(uPressureWithVelocity, vL).x;
@@ -427,13 +428,13 @@ class AdvectVelocityShader extends ShaderMaterial {
     constructor( texelSize:Vector2, dyeTexelSize:Vector2, manualFiltering = false ) {
         super({
             uniforms: {
-                uVelocity: { value: null }, 
-                uSource: { value: null }, 
+                uVelocity: { value: null },
+                uSource: { value: null },
                 sourceIsVelocity: { value: null },
-                texelSize: { value: texelSize }, 
-                dt: { value: 0 }, 
-                dyeTexelSize: { value: dyeTexelSize }, 
-                dissipation: { value: 0.2 }, 
+                texelSize: { value: texelSize },
+                dt: { value: 0 },
+                dyeTexelSize: { value: dyeTexelSize },
+                dissipation: { value: 0.2 },
             },
             defines: {
                 MANUAL_FILTERING: manualFiltering
@@ -444,8 +445,8 @@ class AdvectVelocityShader extends ShaderMaterial {
                 precision highp sampler2D;
 
                 varying vec2 vUv;
-                uniform sampler2D uVelocity; 
-                uniform sampler2D uSource; 
+                uniform sampler2D uVelocity;
+                uniform sampler2D uSource;
                 uniform vec2 texelSize;
                 uniform vec2 dyeTexelSize;
                 uniform float dt;
@@ -483,7 +484,7 @@ class AdvectVelocityShader extends ShaderMaterial {
                             vec4 data = texture2D(uVelocity, vUv);
                             gl_FragColor = vec4( data.r, result.g, result.b, data.a);
                         }
-                        else 
+                        else
                         {
                             gl_FragColor = result;
                         }
@@ -493,55 +494,56 @@ class AdvectVelocityShader extends ShaderMaterial {
     }
 }
 
-
-type TargetObject = {
-    target:Object3D|undefined
-    index:number
-
-    /**
-     * % of texel size... 1=%100 a texel size.
-     */
-    ratio?:number
-    color?:Color
-}
-
-
-type Settings = {
-  splatForce: number;
-  splatThickness: number;
-  vorticityInfluence: number;
-  swirlIntensity: number;
-  pressure: number;
-  velocityDissipation: number;
-  densityDissipation: number;
-  displacementScale: number;
-  pressureIterations: number;
+/** Default settings for the WebGL backend (units are pixel-space velocities). */
+const WEBGL_DEFAULTS: FluidSettings = {
+    splatForce: -196,
+    splatThickness: 1,
+    vorticityInfluence: 1,
+    swirlIntensity: 1,
+    pressure: 0.317,
+    velocityDissipation: 0.283,
+    densityDissipation: 0.138,
+    displacementScale: 0.0078,
+    pressureIterations: 39,
 };
 
-export class FluidV3Material extends MeshPhysicalMaterial {
+/** Debug-panel slider ranges tuned for the WebGL backend. */
+const WEBGL_RANGES: FluidSettingRanges = {
+    splatForce: [-1000, 1000],
+    splatThickness: [0.001, 0.2],
+    vorticityInfluence: [0.1, 1],
+    swirlIntensity: [1, 100],
+    pressure: [0, 1],
+    velocityDissipation: [0, 1],
+    densityDissipation: [0, 1],
+    displacementScale: [-0.1, 0.1],
+    pressureIterations: [1, 100],
+};
 
-    /**
-     * The mesh will forllow this target and the position prev/current will scroll the texture...
-     */
-    private _follow?:Object3D;
-    public get follow() { return this._follow }
-    public set follow( obj:Object3D|undefined )
-    {
-        this._follow = obj;
-        obj?.getWorldPosition(this.lastFollowPos);
-    }
+/* eslint-disable @typescript-eslint/no-empty-object-type, @typescript-eslint/no-unsafe-declaration-merging --
+ * Canonical settings getters/setters (splatForce, pressure, ...) are installed at
+ * runtime by installSettingsAccessors(); this empty interface merges their types
+ * onto the class so callers get e.g. `material.splatForce` without each backend
+ * re-declaring all nine accessors. */
+export interface FluidV3Material extends FluidSettings {}
 
-    private lastFollowPos:Vector3 = new Vector3();
-    private followOffset:Vector3 = new Vector3();
+/**
+ * WebGL fluid material. It is the WebGL adapter for the shared
+ * {@link FluidSimulation}: it owns the GLSL ping-pong render targets and shaders
+ * and implements {@link FluidSimulationBackend}, while the simulation pipeline,
+ * object tracking, follow logic and settings all live in the shared layer.
+ */
+export class FluidV3Material extends MeshPhysicalMaterial implements FluidSimulationBackend {
 
-    private tracking:TargetObject[] ;
+    /** Shared, backend-agnostic simulation pipeline. */
+    private readonly simulation: FluidSimulation;
 
     private currentRT:WebGLRenderTarget;
-    private nextRT:WebGLRenderTarget; 
+    private nextRT:WebGLRenderTarget;
 
     // the "color" + elevation (the alpha...)
-    private dyeRT:WebGLRenderTarget; 
-    private nextDyeRT:WebGLRenderTarget; 
+    private dyeRT:WebGLRenderTarget;
+    private nextDyeRT:WebGLRenderTarget;
 
     /**
      * Color
@@ -558,33 +560,26 @@ export class FluidV3Material extends MeshPhysicalMaterial {
     }
 
     private quad:FullScreenQuad;
-    private raycaster:Raycaster;
-    private tmp:Vector3 = new Vector3();
-    private tmp2:Vector3 = new Vector3();
-
-
 
     private objectPositionTexture:DataTexture; // R
-    private objectPositionArray:Float32Array;
+    /** Per-object positions buffer (FluidSimulationBackend contract). */
+    readonly objectPositionArray:Float32Array;
 
     private objectDataTexture:DataTexture; // R
-    private objectDataArray:Float32Array;
+    /** Per-object data buffer (FluidSimulationBackend contract). */
+    readonly objectDataArray:Float32Array;
 
-
-
-    // shaders involved in the simulation 
-    private scroll:ScrollShader;
-    private splat:SplatShader;
-    private curl:CurlShader;
-    private vorticity:VorticityShader;
+    // shaders involved in the simulation
+    private scrollShader:ScrollShader;
+    private splatShader:SplatShader;
+    private curlShader:CurlShader;
+    private vorticityShader:VorticityShader;
     private divergenceShader:DivergenceShader;
     private clearShader:ClearShader;
     private pressureShader:PressureShader;
     private gradientShader:GradientSubtractShader;
-    private advectionShader:AdvectVelocityShader; 
+    private advectionShader:AdvectVelocityShader;
     private supportLinearFiltering:boolean;
-
-    private t = 0;
 
     /**
      * If `true` on every update the `alphaMap` will be set to the `colorMap`
@@ -592,12 +587,12 @@ export class FluidV3Material extends MeshPhysicalMaterial {
     private actAsSmoke = false;
 
     constructor( private renderer:WebGLRenderer, textureWidth:number, textureHeight:number, objectCount=1 )
-    { 
+    {
         const aspect = textureWidth / textureHeight;
- 
+
         super({
-            roughness: 1,   
-            color: new Color( 0xffffff ), 
+            roughness: 1,
+            color: new Color( 0xffffff ),
             displacementScale:0.0078,
             transparent:true
         });
@@ -613,9 +608,9 @@ export class FluidV3Material extends MeshPhysicalMaterial {
 
 
         // 2. Create a Float32Array to hold the data
-        
+
         this.objectDataArray = new Float32Array(objectCount * 4);// color + ratio: R, G, B, ratio
-        this.objectPositionArray = new Float32Array(objectCount * 4);// current + old UV positions: current.x, current.y, prev.x, prev.y 
+        this.objectPositionArray = new Float32Array(objectCount * 4);// current + old UV positions: current.x, current.y, prev.x, prev.y
 
         // 3. Create the DataTexture
         this.objectDataTexture = new DataTexture(
@@ -624,7 +619,7 @@ export class FluidV3Material extends MeshPhysicalMaterial {
             1,           // height
             RGBAFormat,
             FloatType
-        );  
+        );
 
         this.objectPositionTexture = new DataTexture(
             this.objectPositionArray,
@@ -632,13 +627,10 @@ export class FluidV3Material extends MeshPhysicalMaterial {
             1,           // height
             RGBAFormat,
             FloatType
-        );  
+        );
 
-        this.tracking = new Array(objectCount).fill(0).map((_, index) => ({ target:undefined, index, ratio:1 }));
+        this.quad = new FullScreenQuad();
 
-        this.quad = new FullScreenQuad(); 
-        this.raycaster = new Raycaster();
-        
         const texel = new Vector2( 1/textureWidth, 1/textureHeight );
 
         // ----- shaders used to simulate the liquid -----
@@ -646,43 +638,181 @@ export class FluidV3Material extends MeshPhysicalMaterial {
         const gl = renderer.getContext();
         this.supportLinearFiltering = !!gl.getExtension('OES_texture_half_float_linear');
 
-        this.scroll = new ScrollShader( texel );
-        this.splat = new SplatShader( texel, objectCount, aspect );
-        this.curl = new CurlShader(texel);
-        this.vorticity = new VorticityShader( texel );
+        this.scrollShader = new ScrollShader( texel );
+        this.splatShader = new SplatShader( texel, objectCount, aspect );
+        this.curlShader = new CurlShader(texel);
+        this.vorticityShader = new VorticityShader( texel );
         this.divergenceShader = new DivergenceShader( texel );
         this.clearShader = new ClearShader( texel );
         this.pressureShader = new PressureShader(texel);
         this.gradientShader = new GradientSubtractShader(texel);
         this.advectionShader = new AdvectVelocityShader(texel, texel, this.supportLinearFiltering? false : true );
+
+        // shared pipeline + tracking + settings; `this` is the WebGL backend.
+        this.simulation = new FluidSimulation(this, objectCount, WEBGL_DEFAULTS);
+        installSettingsAccessors(this, this.simulation);
     }
 
+    // ---------------------------------------------------------------------------
+    // Public, backend-agnostic API (delegated to the shared simulation)
+    // ---------------------------------------------------------------------------
 
+    /** @see FluidSimulation.follow */
+    get follow() { return this.simulation.follow }
+    set follow( obj:Object3D|undefined ) { this.simulation.follow = obj }
 
-    get splatForce() {
-        return this.splat.uniforms.splatForce.value;
+    /** @see FluidSimulation.track */
+    track( object:Object3D, ratio = 1, color:ColorRepresentation = Color.NAMES.black ) {
+        this.simulation.track( object, ratio, color );
     }
-    set splatForce( v:number ) {
-        this.splat.uniforms.splatForce.value = v;
+
+    /** @see FluidSimulation.untrack */
+    untrack( object:Object3D ) {
+        this.simulation.untrack( object );
     }
-
-    get splatThickness() { return this.splat.uniforms.thickness.value }
-    set splatThickness(v:number) {  this.splat.uniforms.thickness.value=v }
-    get vorticityInfluence() { return this.curl.uniforms.vorticityInfluence.value }
-    set vorticityInfluence(v:number) {  this.curl.uniforms.vorticityInfluence.value=v }
-
-    get swirlIntensity() { return this.vorticity.uniforms.curl.value }
-    set swirlIntensity(v:number) {  this.vorticity.uniforms.curl.value=v } 
-
-    get pressure() { return this.clearShader.uniforms.value.value }
-    set pressure(v:number) {  this.clearShader.uniforms.value.value=v } 
-
-    velocityDissipation = 0.283;
-    densityDissipation = 0.138;
-    pressureIterations = 39;
 
     /**
-     * Make normals respect the displacement... 
+     * @param delta time step in seconds
+     * @param mesh The plane mesh used to simulate the liquid.
+     */
+    update( delta:number, mesh:Mesh ) {
+        this.simulation.update( delta, mesh );
+    }
+
+    /** @see FluidSimulation.setSettings */
+    setSettings( s:Partial<FluidSettings> & { pressureDecay?:number; bumpDisplacmentScale?:number } ) {
+        this.simulation.setSettings( s );
+    }
+
+    addDebugPanelFolder( gui:GUI, name = "Fluid Material" ) {
+        const panel = this.simulation.addDebugPanelFolder( gui, WEBGL_RANGES, name );
+        panel.add(this as { asSolid(): void; asSmoke(): void }, "asSolid");
+        panel.add(this as { asSolid(): void; asSmoke(): void }, "asSmoke");
+        return panel;
+    }
+
+    asSolid() {
+        this.alphaMap = null;
+        this.transparent = false;
+        this.actAsSmoke = false;
+    }
+
+    asSmoke() {
+        this.transparent = true;
+        this.actAsSmoke = true;
+    }
+
+    // ---------------------------------------------------------------------------
+    // FluidSimulationBackend implementation (WebGL / GLSL specifics)
+    // ---------------------------------------------------------------------------
+
+    markObjectDataDirty(): void {
+        this.objectDataTexture.needsUpdate = true;
+    }
+
+    markObjectPositionDirty(): void {
+        this.objectPositionTexture.needsUpdate = true;
+    }
+
+    applySettings(s: FluidSettings): void {
+        this.splatShader.uniforms.splatForce.value = s.splatForce;
+        this.splatShader.uniforms.thickness.value = s.splatThickness;
+        this.curlShader.uniforms.vorticityInfluence.value = s.vorticityInfluence;
+        this.vorticityShader.uniforms.curl.value = s.swirlIntensity;
+        this.clearShader.uniforms.value.value = s.pressure;
+        // `displacementScale` is read directly off this material by three.js (the
+        // installed accessor returns settings.displacementScale), so there is
+        // nothing extra to push here.
+    }
+
+    scroll(uvStep: Vector2): void {
+        this.scrollShader.uniforms.uvScroll.value = uvStep;
+
+        this.scrollShader.uniforms.uTarget.value = this.currentRT.texture;
+        this.blit(this.scrollShader);
+
+        this.scrollShader.uniforms.uTarget.value = this.dyeRT.texture;
+        this.blitDye(this.scrollShader);
+    }
+
+    splatVelocity(): void {
+        this.splatShader.uniforms.objectData.value = this.objectDataTexture;
+        this.splatShader.uniforms.objectPosition.value = this.objectPositionTexture;
+        this.splatShader.uniforms.uTarget.value = this.currentRT.texture;
+        this.splatShader.uniforms.splatVelocity.value = true;
+        this.blit(this.splatShader);
+    }
+
+    splatColor(): void {
+        this.splatShader.uniforms.objectData.value = this.objectDataTexture;
+        this.splatShader.uniforms.objectPosition.value = this.objectPositionTexture;
+        this.splatShader.uniforms.uTarget.value = this.dyeRT.texture;
+        this.splatShader.uniforms.splatVelocity.value = false;
+        this.blitDye(this.splatShader);
+    }
+
+    curl(): void {
+        this.curlShader.uniforms.uVelocity.value = this.currentRT.texture;
+        this.blit(this.curlShader);
+    }
+
+    vorticity(delta: number): void {
+        this.vorticityShader.uniforms.uVelocityAndCurl.value = this.currentRT.texture;
+        this.vorticityShader.uniforms.dt.value = delta;
+        this.blit(this.vorticityShader);
+    }
+
+    divergence(): void {
+        this.divergenceShader.uniforms.uVelocity.value = this.currentRT.texture;
+        this.blit(this.divergenceShader);
+    }
+
+    clearPressure(): void {
+        this.clearShader.uniforms.uTexture.value = this.currentRT.texture;
+        this.blit(this.clearShader);
+    }
+
+    pressureStep(): void {
+        this.pressureShader.uniforms.uPressureWithDivergence.value = this.currentRT.texture;
+        this.blit(this.pressureShader);
+    }
+
+    gradientSubtract(): void {
+        this.gradientShader.uniforms.uPressureWithVelocity.value = this.currentRT.texture;
+        this.blit(this.gradientShader);
+    }
+
+    advectVelocity(delta: number, dissipation: number): void {
+        this.advectionShader.uniforms.dt.value = delta;
+        this.advectionShader.uniforms.uVelocity.value = this.currentRT.texture;
+        this.advectionShader.uniforms.uSource.value = this.currentRT.texture;
+        this.advectionShader.uniforms.sourceIsVelocity.value = true;
+        this.advectionShader.uniforms.dissipation.value = dissipation;
+        this.blit(this.advectionShader);
+    }
+
+    advectColor(delta: number, dissipation: number): void {
+        this.advectionShader.uniforms.dt.value = delta;
+        this.advectionShader.uniforms.uVelocity.value = this.currentRT.texture;
+        this.advectionShader.uniforms.uSource.value = this.dyeRT.texture;
+        this.advectionShader.uniforms.sourceIsVelocity.value = false;
+        this.advectionShader.uniforms.dissipation.value = dissipation;
+        this.blitDye(this.advectionShader);
+    }
+
+    present(): void {
+        this.renderer.setRenderTarget(null);
+
+        this.displacementMap = this.dyeRT.texture;
+
+        if (this.actAsSmoke) {
+            this.alphaMap = this.dyeRT.texture;
+        }
+        this.map = this.dyeRT.texture;
+    }
+
+    /**
+     * Make normals respect the displacement...
      */
     override onBeforeCompile( shader: WebGLProgramParametersWithUniforms ): void {
          // Pass UV and world position to fragment shader
@@ -706,12 +836,12 @@ export class FluidV3Material extends MeshPhysicalMaterial {
                     '#include <displacementmap_vertex>',
                     `
                     #ifdef USE_DISPLACEMENTMAP
-                    
+
                         vec3 dispColor = texture2D( displacementMap, vUv ).rgb;
                         float displacement = max( max(dispColor.r, dispColor.g),  dispColor.b );
-                        
+
                         transformed += normalize( objectNormal ) * ( displacement * displacementScale + displacementBias );
-                        
+
                     #endif
                 `
     );
@@ -744,176 +874,9 @@ export class FluidV3Material extends MeshPhysicalMaterial {
                     vec3 normal = normalView;
                     vec3 nonPerturbedNormal = normalView;
                 `
-                ); 
+                );
     }
 
-    /**
-     * This is where you add "objects" to be tracked to affect the liquid.
-     * They current and past positions will be used to calculate their directional speed.
-     * @param object 
-     */
-    track( object:Object3D, ratio = 1, color:ColorRepresentation = Color.NAMES.black ) {
-        const freeSlot = this.tracking.find( slot=>!slot.target );
-        if( !freeSlot )
-        {
-            throw new Error(`No room for tracking, all slots taken!`);
-        }
-
-        // hacer un raycast desde la posision del objeto hacia abajo
-        // averiguar el UV donde nos pega
-        // setear ese valor como nuestra posision
-
-        freeSlot.target = object; 
-        freeSlot.ratio = ratio; 
-        freeSlot.color = new Color(color);
-
-        const i = freeSlot.index;
-
-        this.objectDataArray[ i ] = freeSlot.color.r;
-        this.objectDataArray[ i*4+1 ] = freeSlot.color.g;
-        this.objectDataArray[ i*4+2 ] = freeSlot.color.b;
-        this.objectDataArray[ i*4+3 ] = ratio;
-
-
-        this.objectDataTexture.needsUpdate = true;
-    }
-
-    untrack( object:Object3D )
-    {
-        this.tracking.forEach( t=> {
-
-            if( t.target==object )
-            {
-                t.target = undefined;
-                t.ratio = 1;
-                t.color?.set(0,0,0);
-
-                const i = t.index;
-
-                this.objectDataArray[ i ] = 0;
-                this.objectDataArray[ i*4+1 ] = 0;
-                this.objectDataArray[ i*4+2 ] = 0;
-                this.objectDataArray[ i*4+3 ] = 0;
-                this.objectDataTexture.needsUpdate = true;
-            }
-
-        });
-    }
-
-    /**
-     * Update the positions... we use the UVs as the positions. We cast a ray from the objects to the surface simulating the liquid
-     * and calculate the UV that is below the object.
-     */
-    private updatePositions( mesh:Mesh ) { 
-        
-
-        if( this.follow ) //asumes the Y is the up vector and we are following only in the XZ plane
-        { 
-            this.follow.getWorldPosition( this.tmp );
-
-            // 
-            this.followOffset.copy( this.tmp ).sub(this.lastFollowPos);
-            this.followOffset.y = 0; // ignore the Y axis...
-
-            this.lastFollowPos.copy( this.tmp );
-
-            if( mesh.parent )
-            {
-                mesh.parent.worldToLocal(this.tmp);
-            }
-
-            mesh.position.x = this.tmp.x;  
-            mesh.position.z = this.tmp.z;   
-        }
-
-        let offset:Vector2|undefined; //UV Offset
-
-        // update objects positions....
-        this.tracking.forEach( obj => {
-
-            if( !obj.target ) return; 
-             
-            this.tmp.set(0,1,0); //<--- assuming the origin ob the objects is at the bottom of the models.
-            const wpos = obj.target.localToWorld( this.tmp );
-            const followingObj = obj.target==this.follow;
-
-            // if this is the object we are following...
-            if( followingObj )
-            { 
-                wpos.sub( this.followOffset );// because we ant to sample the UV at the last position since following means the obj will be fixed at 0.5 0.5 UV at dead center
-            }  
-
-            this.tmp2.copy( wpos );
-
-            const rpos = mesh.worldToLocal( this.tmp2 );
-                rpos.y = 0; // this will put the position at the surface of the mesh
-
-                mesh.localToWorld( rpos ); // this way we point at the surface of the mesh.
- 
-
-            this.raycaster.set( wpos, rpos.sub(wpos).normalize() );
-
-            const hit = this.raycaster.intersectObject( mesh, true);
-
-            if( hit.length )
-            {
-                const uv = hit[0].uv; // <--- UV under the object
-                
-                if( uv )
-                {
-                    const i = obj.index;
-
-                    if( followingObj )
-                    {
-                        // old positions...
-                        this.objectPositionArray[i * 4 + 2] = uv.x;
-                        this.objectPositionArray[i * 4 + 3] = uv.y; 
-
-                        // new positions...
-                        this.objectPositionArray[i * 4 + 0] = 0.5;
-                        this.objectPositionArray[i * 4 + 1] = 0.5; 
-
-                        ///////
-                        offset = new Vector2(  0.5-uv.x, 0.5-uv.y );
-
-                        this.scrollTextures( offset ); 
- 
-                    }
-                    else 
-                    {
-                        // old positions...
-                        this.objectPositionArray[i * 4 + 2] = this.objectPositionArray[i * 4 + 0];
-                        this.objectPositionArray[i * 4 + 3] = this.objectPositionArray[i * 4 + 1]; 
-
-                        // new positions...
-                        this.objectPositionArray[i * 4 + 0] = uv.x;
-                        this.objectPositionArray[i * 4 + 1] = uv.y; 
-                    }
-
-                    
- 
-                }
-                
-            } 
-
-        }); 
-
-        if( this.follow && offset!=null )
-        {
-            // the UV was scrolled, so we must dubstract this offset from all positions exept the follow target
-            this.tracking.forEach( obj => {
-                if( obj.target && obj.target!=this.follow )
-                { 
-                    const i = obj.index;
-                    this.objectPositionArray[i * 4 + 2] -= offset!.x;  
-                    this.objectPositionArray[i * 4 + 3] -= offset!.y;  
-                }
-            });
-        }
-
-        this.objectPositionTexture.needsUpdate = true;
-    }
- 
     /**
      * Renders the material into the next render texture and then swaps them so the new currentRT is the one that was generated by the material.
      */
@@ -921,7 +884,7 @@ export class FluidV3Material extends MeshPhysicalMaterial {
     {
         this.renderer.setRenderTarget( this.nextRT );
         this.quad.material = material;
-        this.quad.render(this.renderer); 
+        this.quad.render(this.renderer);
 
         //swap
         [this.currentRT, this.nextRT] = [this.nextRT, this.currentRT];
@@ -930,169 +893,9 @@ export class FluidV3Material extends MeshPhysicalMaterial {
     private blitDye( material:ShaderMaterial ) {
         this.renderer.setRenderTarget( this.nextDyeRT );
         this.quad.material = material;
-        this.quad.render(this.renderer); 
+        this.quad.render(this.renderer);
 
         //swap
         [this.dyeRT, this.nextDyeRT] = [this.nextDyeRT, this.dyeRT];
-    }
-
-    private scrollTextures( uvStep:Vector2 )
-    {
-        this.scroll.uniforms.uvScroll.value = uvStep; 
-
-        this.scroll.uniforms.uTarget.value = this.currentRT.texture; 
-        this.blit( this.scroll );  
- 
-        this.scroll.uniforms.uTarget.value = this.dyeRT.texture; 
-        this.blitDye( this.scroll );  
-    }
-
-    /** 
-     * @param delta 
-     * @param mesh The mesh that is the plane tht will be used to simulate the liquid....
-     */
-    update( delta:number, mesh:Mesh )
-    {
-        this.t += delta;
-
-        this.updatePositions( mesh );
-
-        // 1. add new velocities based on objects movement
-        this.splat.uniforms.objectData.value = this.objectDataTexture;
-        this.splat.uniforms.objectPosition.value = this.objectPositionTexture;
-        this.splat.uniforms.uTarget.value = this.currentRT.texture; 
-        this.splat.uniforms.splatVelocity.value = true; 
-
-        this.blit( this.splat );  
-
-        // add colors
-        this.splat.uniforms.objectData.value = this.objectDataTexture;
-        this.splat.uniforms.objectPosition.value = this.objectPositionTexture;
-        this.splat.uniforms.uTarget.value = this.dyeRT.texture; 
-        this.splat.uniforms.splatVelocity.value = false; 
-
-        this.blitDye( this.splat );   
-
-        // 2. vorticity : will be put into the alpha channel...
-        this.curl.uniforms.uVelocity.value = this.currentRT.texture;
-        this.blit( this.curl );  
-
-        // 3. apply vorticity forces
-        this.vorticity.uniforms.uVelocityAndCurl.value = this.currentRT.texture;
-        this.vorticity.uniforms.dt.value = delta;
-        this.blit( this.vorticity );  
-
-        // 4. divergence
-        this.divergenceShader.uniforms.uVelocity.value = this.currentRT.texture;
-        this.blit( this.divergenceShader );
-
-        // 5. clear pressure
-        this.clearShader.uniforms.uTexture.value = this.currentRT.texture;
-        this.blit( this.clearShader );
-
-        // 6. calculates and updates pressure  
-
-        for (let i = 0; i < this.pressureIterations; i++) {
-            this.pressureShader.uniforms.uPressureWithDivergence.value = this.currentRT.texture;
-            this.blit( this.pressureShader );
-        } 
-
-        // 7. Gradient
-        this.gradientShader.uniforms.uPressureWithVelocity.value = this.currentRT.texture;
-        this.blit( this.gradientShader );
-
-        // 8. Advect velocity
-        this.advectionShader.uniforms.dt.value = delta;
-
-        this.advectionShader.uniforms.uVelocity.value = this.currentRT.texture; 
-        this.advectionShader.uniforms.uSource.value = this.currentRT.texture; 
-        this.advectionShader.uniforms.sourceIsVelocity.value = true; 
-        this.advectionShader.uniforms.dissipation.value = this.velocityDissipation; //VELOCITY_DISSIPATION
-        this.blit( this.advectionShader );
- 
-        // 8. Advect dye / color
-        this.advectionShader.uniforms.uVelocity.value = this.currentRT.texture; 
-        this.advectionShader.uniforms.uSource.value = this.dyeRT.texture; 
-        this.advectionShader.uniforms.sourceIsVelocity.value = false; 
-        this.advectionShader.uniforms.dissipation.value = this.densityDissipation; //DENSITY_DISSIPATION 
-        this.blitDye( this.advectionShader );
-
-        
-
-        this.renderer.setRenderTarget(null);
-
-        this.displacementMap = this.dyeRT.texture; 
-
-        if( this.actAsSmoke )
-        { 
-            this.alphaMap = this.dyeRT.texture;
-        }  
-        this.map = this.dyeRT.texture;
-        
-    }
-
-    addDebugPanelFolder( gui:GUI, name="Fluid Material") {
-
-        const panel = gui.addFolder(name);
-
-        panel.add( this as Record<string, any>, "splatForce", -1000, 1000 );
-        panel.add( this as Record<string, any>, "splatThickness", 0.001, 0.2 );
-        panel.add( this as Record<string, any>, "vorticityInfluence", 0.1, 1 );
-        panel.add( this as Record<string, any>, "swirlIntensity", 1, 100 );
-        panel.add( this as Record<string, any>, "pressure", 0, 1 );
-        panel.add( this as Record<string, any>, "velocityDissipation", 0, 1 );
-        panel.add( this as Record<string, any>, "densityDissipation", 0, 1 );
-        panel.add( this as Record<string, any>, "displacementScale", -.1, .1 );
-        panel.add( this as Record<string, any>, "pressureIterations", 1, 100, 1 );
-        panel.add( {
-            copySettings: ()=>{
-
-                const settings = {
-                    splatForce: this.splatForce,
-                    splatThickness: this.splatThickness,
-                    vorticityInfluence: this.vorticityInfluence,
-                    swirlIntensity: this.swirlIntensity,
-                    pressure: this.pressure,
-                    velocityDissipation: this.velocityDissipation,
-                    densityDissipation: this.densityDissipation,
-                    displacementScale: this.displacementScale,
-                    pressureIterations: this.pressureIterations,
-                }
-
-                navigator.clipboard.writeText( JSON.stringify(settings, null, 2));
-                
-            }
-        }, "copySettings" );
-
-        panel.add(this as Record<string, any>, "asSolid"); 
-        panel.add(this as Record<string, any>, "asSmoke");
-    }
-
-    asSolid() {
-        this.alphaMap = null;
-        this.transparent = false;
-        this.actAsSmoke = false;
-    }
-
-    asSmoke() {
-        this.transparent = true;
-        this.actAsSmoke = true;
-        this.actAsSmoke = true;
-    }
-
-    /**
-     * Restore values previously copied from the debug panel...
-     * @see `addDebugPanelFolder`
-     */
-    setSettings( s:Settings ) {
-        this.splatForce = s.splatForce;
-        this.splatThickness = s.splatThickness;
-        this.vorticityInfluence = s.vorticityInfluence;
-        this.swirlIntensity = s.swirlIntensity;
-        this.pressure = s.pressure;
-        this.velocityDissipation = s.velocityDissipation;
-        this.densityDissipation = s.densityDissipation;
-        this.displacementScale = s.displacementScale;
-        this.pressureIterations = s.pressureIterations; 
     }
 }
