@@ -68,8 +68,8 @@ let time = 0;
   fluidMat.color = new THREE.Color(0xfefefe);
   fluidMat.metalness = 0
  
-  fluidMat.splatForce = -42;
-  fluidMat.splatThickness = 0.00796;
+  fluidMat.params.set("splatForce", -42);
+  fluidMat.params.set("splatThickness", 0.00796);
   
 
   scene.background = new THREE.Color(0x333333)
@@ -101,7 +101,7 @@ let time = 0;
           "splatThickness": 0.0199,
           "vorticityInfluence": 1,
           "swirlIntensity": 7.821,
-          "pressure": 0.676,
+          "pressureDecay": 0.676,
           "velocityDissipation": 0.283,
           "densityDissipation": 0.761,
           "displacementScale": 0.013,

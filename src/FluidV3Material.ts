@@ -22,9 +22,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
-import GUI from "three/examples/jsm/libs/lil-gui.module.min.js";
 import { Color, ColorRepresentation, DataTexture, FloatType, Mesh, MeshPhysicalMaterial, Object3D, Raycaster, RGBAFormat, ShaderMaterial, Vector2, Vector3, WebGLRenderer, WebGLRenderTarget, type WebGLProgramParametersWithUniforms } from "three";
 import { FullScreenQuad } from "three/examples/jsm/Addons.js";
+import { FluidSimParams } from "./FluidSimParams";
+import type GUI from "three/examples/jsm/libs/lil-gui.module.min.js";
 
 /**
  * R - Pressure
@@ -506,18 +507,6 @@ type TargetObject = {
 }
 
 
-type Settings = {
-  splatForce: number;
-  splatThickness: number;
-  vorticityInfluence: number;
-  swirlIntensity: number;
-  pressure: number;
-  velocityDissipation: number;
-  densityDissipation: number;
-  displacementScale: number;
-  pressureIterations: number;
-};
-
 export class FluidV3Material extends MeshPhysicalMaterial {
 
     /**
@@ -562,6 +551,12 @@ export class FluidV3Material extends MeshPhysicalMaterial {
     private tmp:Vector3 = new Vector3();
     private tmp2:Vector3 = new Vector3();
 
+    /**
+     * 集中管理所有可配置参数。
+     * 外部可直接读写：`fluidMat.params.set("splatForce", -100)`
+     */
+    readonly params: FluidSimParams;
+
 
 
     private objectPositionTexture:DataTexture; // R
@@ -592,15 +587,18 @@ export class FluidV3Material extends MeshPhysicalMaterial {
     private actAsSmoke = false;
 
     constructor( private renderer:WebGLRenderer, textureWidth:number, textureHeight:number, objectCount=1 )
-    { 
+    {
         const aspect = textureWidth / textureHeight;
- 
+
         super({
-            roughness: 1,   
-            color: new Color( 0xffffff ), 
+            roughness: 1,
+            color: new Color( 0xffffff ),
             displacementScale:0.0078,
             transparent:true
         });
+
+        // ─── 初始化参数管理器 ─────────────────────────────
+        this.params = new FluidSimParams();
 
         // ping pong render textures...
         this.currentRT = new WebGLRenderTarget(textureWidth, textureHeight, { type: FloatType });
@@ -613,9 +611,9 @@ export class FluidV3Material extends MeshPhysicalMaterial {
 
 
         // 2. Create a Float32Array to hold the data
-        
+
         this.objectDataArray = new Float32Array(objectCount * 4);// color + ratio: R, G, B, ratio
-        this.objectPositionArray = new Float32Array(objectCount * 4);// current + old UV positions: current.x, current.y, prev.x, prev.y 
+        this.objectPositionArray = new Float32Array(objectCount * 4);// current + old UV positions: current.x, current.y, prev.x, prev.y
 
         // 3. Create the DataTexture
         this.objectDataTexture = new DataTexture(
@@ -624,7 +622,7 @@ export class FluidV3Material extends MeshPhysicalMaterial {
             1,           // height
             RGBAFormat,
             FloatType
-        );  
+        );
 
         this.objectPositionTexture = new DataTexture(
             this.objectPositionArray,
@@ -632,13 +630,13 @@ export class FluidV3Material extends MeshPhysicalMaterial {
             1,           // height
             RGBAFormat,
             FloatType
-        );  
+        );
 
         this.tracking = new Array(objectCount).fill(0).map((_, index) => ({ target:undefined, index, ratio:1 }));
 
-        this.quad = new FullScreenQuad(); 
+        this.quad = new FullScreenQuad();
         this.raycaster = new Raycaster();
-        
+
         const texel = new Vector2( 1/textureWidth, 1/textureHeight );
 
         // ----- shaders used to simulate the liquid -----
@@ -655,34 +653,28 @@ export class FluidV3Material extends MeshPhysicalMaterial {
         this.pressureShader = new PressureShader(texel);
         this.gradientShader = new GradientSubtractShader(texel);
         this.advectionShader = new AdvectVelocityShader(texel, texel, this.supportLinearFiltering? false : true );
+
+        // ─── 绑定参数到 shader uniforms / 材质属性 ─────────
+        this.params.bindUniform("splatForce", this.splat.uniforms["splatForce"]);
+        this.params.bindUniform("splatThickness", this.splat.uniforms["thickness"]);
+        this.params.bindUniform("vorticityInfluence", this.curl.uniforms["vorticityInfluence"]);
+        this.params.bindUniform("swirlIntensity", this.vorticity.uniforms["curl"]);
+        this.params.bindUniform("pressureDecay", this.clearShader.uniforms["value"]);
+        this.params.bind("displacementScale", {
+            get: () => this.displacementScale as number,
+            set: (v: number) => { this.displacementScale = v; },
+        });
+        // velocityDissipation / densityDissipation / pressureIterations 无对应 uniform，
+        // 在 update() 中通过 params.get() 读取，绑定仅用于存储。
+        this.params.bind("velocityDissipation", { get: () => this.params.get("velocityDissipation"), set: () => {} });
+        this.params.bind("densityDissipation", { get: () => this.params.get("densityDissipation"), set: () => {} });
+        this.params.bind("pressureIterations", { get: () => this.params.get("pressureIterations"), set: () => {} });
     }
 
 
-
-    get splatForce() {
-        return this.splat.uniforms.splatForce.value;
-    }
-    set splatForce( v:number ) {
-        this.splat.uniforms.splatForce.value = v;
-    }
-
-    get splatThickness() { return this.splat.uniforms.thickness.value }
-    set splatThickness(v:number) {  this.splat.uniforms.thickness.value=v }
-    get vorticityInfluence() { return this.curl.uniforms.vorticityInfluence.value }
-    set vorticityInfluence(v:number) {  this.curl.uniforms.vorticityInfluence.value=v }
-
-    get swirlIntensity() { return this.vorticity.uniforms.curl.value }
-    set swirlIntensity(v:number) {  this.vorticity.uniforms.curl.value=v } 
-
-    get pressure() { return this.clearShader.uniforms.value.value }
-    set pressure(v:number) {  this.clearShader.uniforms.value.value=v } 
-
-    velocityDissipation = 0.283;
-    densityDissipation = 0.138;
-    pressureIterations = 39;
 
     /**
-     * Make normals respect the displacement... 
+     * Make normals respect the displacement...
      */
     override onBeforeCompile( shader: WebGLProgramParametersWithUniforms ): void {
          // Pass UV and world position to fragment shader
@@ -992,7 +984,7 @@ export class FluidV3Material extends MeshPhysicalMaterial {
 
         // 6. calculates and updates pressure  
 
-        for (let i = 0; i < this.pressureIterations; i++) {
+        for (let i = 0; i < this.params.get("pressureIterations"); i++) {
             this.pressureShader.uniforms.uPressureWithDivergence.value = this.currentRT.texture;
             this.blit( this.pressureShader );
         } 
@@ -1007,14 +999,14 @@ export class FluidV3Material extends MeshPhysicalMaterial {
         this.advectionShader.uniforms.uVelocity.value = this.currentRT.texture; 
         this.advectionShader.uniforms.uSource.value = this.currentRT.texture; 
         this.advectionShader.uniforms.sourceIsVelocity.value = true; 
-        this.advectionShader.uniforms.dissipation.value = this.velocityDissipation; //VELOCITY_DISSIPATION
+        this.advectionShader.uniforms.dissipation.value = this.params.get("velocityDissipation"); //VELOCITY_DISSIPATION
         this.blit( this.advectionShader );
  
         // 8. Advect dye / color
         this.advectionShader.uniforms.uVelocity.value = this.currentRT.texture; 
         this.advectionShader.uniforms.uSource.value = this.dyeRT.texture; 
         this.advectionShader.uniforms.sourceIsVelocity.value = false; 
-        this.advectionShader.uniforms.dissipation.value = this.densityDissipation; //DENSITY_DISSIPATION 
+        this.advectionShader.uniforms.dissipation.value = this.params.get("densityDissipation"); //DENSITY_DISSIPATION 
         this.blitDye( this.advectionShader );
 
         
@@ -1032,40 +1024,10 @@ export class FluidV3Material extends MeshPhysicalMaterial {
     }
 
     addDebugPanelFolder( gui:GUI, name="Fluid Material") {
-
-        const panel = gui.addFolder(name);
-
-        panel.add( this as Record<string, any>, "splatForce", -1000, 1000 );
-        panel.add( this as Record<string, any>, "splatThickness", 0.001, 0.2 );
-        panel.add( this as Record<string, any>, "vorticityInfluence", 0.1, 1 );
-        panel.add( this as Record<string, any>, "swirlIntensity", 1, 100 );
-        panel.add( this as Record<string, any>, "pressure", 0, 1 );
-        panel.add( this as Record<string, any>, "velocityDissipation", 0, 1 );
-        panel.add( this as Record<string, any>, "densityDissipation", 0, 1 );
-        panel.add( this as Record<string, any>, "displacementScale", -.1, .1 );
-        panel.add( this as Record<string, any>, "pressureIterations", 1, 100, 1 );
-        panel.add( {
-            copySettings: ()=>{
-
-                const settings = {
-                    splatForce: this.splatForce,
-                    splatThickness: this.splatThickness,
-                    vorticityInfluence: this.vorticityInfluence,
-                    swirlIntensity: this.swirlIntensity,
-                    pressure: this.pressure,
-                    velocityDissipation: this.velocityDissipation,
-                    densityDissipation: this.densityDissipation,
-                    displacementScale: this.displacementScale,
-                    pressureIterations: this.pressureIterations,
-                }
-
-                navigator.clipboard.writeText( JSON.stringify(settings, null, 2));
-                
-            }
-        }, "copySettings" );
-
-        panel.add(this as Record<string, any>, "asSolid"); 
-        panel.add(this as Record<string, any>, "asSmoke");
+        const panel = this.params.addDebugPanel(gui, name);
+        panel.add({ asSolid: () => this.asSolid() }, "asSolid").name("As Solid");
+        panel.add({ asSmoke: () => this.asSmoke() }, "asSmoke").name("As Smoke");
+        return panel;
     }
 
     asSolid() {
@@ -1077,22 +1039,13 @@ export class FluidV3Material extends MeshPhysicalMaterial {
     asSmoke() {
         this.transparent = true;
         this.actAsSmoke = true;
-        this.actAsSmoke = true;
     }
 
     /**
      * Restore values previously copied from the debug panel...
      * @see `addDebugPanelFolder`
      */
-    setSettings( s:Settings ) {
-        this.splatForce = s.splatForce;
-        this.splatThickness = s.splatThickness;
-        this.vorticityInfluence = s.vorticityInfluence;
-        this.swirlIntensity = s.swirlIntensity;
-        this.pressure = s.pressure;
-        this.velocityDissipation = s.velocityDissipation;
-        this.densityDissipation = s.densityDissipation;
-        this.displacementScale = s.displacementScale;
-        this.pressureIterations = s.pressureIterations; 
+    setSettings( s: Partial<Record<string, number>> ) {
+        this.params.applySettings(s);
     }
 }

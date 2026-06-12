@@ -26,6 +26,7 @@ SOFTWARE.
 import GUI from "three/examples/jsm/libs/lil-gui.module.min.js";
 import { NodeRepresentation, storage, abs, add, clamp, Continue, cross, distance, dot, Fn, If, instanceIndex, length, Loop, max, mix, modelNormalMatrix, mul, normalGeometry, normalize, positionLocal, smoothstep, texture, textureStore, uniform, uv, vec2, vec3, vec4, type ShaderNodeObject } from "three/tsl";
 import { Color, ComputeNode, FloatType, Mesh, MeshPhysicalNodeMaterial, Node, Object3D, Raycaster, StorageBufferAttribute, StorageTexture, Texture, TextureNode, UniformNode, Vector2, Vector3, WebGPURenderer, type ColorRepresentation } from "three/webgpu";
+import { FluidSimParams } from "./FluidSimParams";
 
 type Sampler2D = ShaderNodeObject<TextureNode>;
 type NumberUniform = ShaderNodeObject<UniformNode<number>>;
@@ -350,18 +351,6 @@ export class TrackedObject {
 }
 
 
-type Settings = {
-    splatForce: number;
-    splatThickness: number;
-    vorticityInfluence: number;
-    swirlIntensity: number;
-    pressureDecay: number;
-    velocityDissipation: number;
-    densityDissipation: number;
-    bumpDisplacmentScale: number;
-    pressureIterations: number;
-};
-
 type FluidMaterialSettings = {
 
     /**
@@ -419,32 +408,11 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
     private tracking: TrackedObject[];
     private renderMaterial: (material: ComputeShader, target: Texture) => void;
 
-
-    get splatForce() {
-        return this.splat.splatForce.value;
-    }
-    set splatForce(v: number) {
-        this.splat.splatForce.value = v;
-    }
-
-    get splatThickness() { return this.splat.thickness.value }
-    set splatThickness(v: number) { this.splat.thickness.value = v }
-    get vorticityInfluence() { return this.curl.vorticityInfluence.value }
-    set vorticityInfluence(v: number) { this.curl.vorticityInfluence.value = v }
-
-    get swirlIntensity() { return this.vorticity.curl.value }
-    set swirlIntensity(v: number) { this.vorticity.curl.value = v }
-
-    get pressureDecay() { return this.clear.decay.value }
-    set pressureDecay(v: number) { this.clear.decay.value = v }
-
-    get bumpDisplacmentScale() {
-        return this._bumpDisplacmentScale.value;
-    }
-
-    set bumpDisplacmentScale(v: number) {
-        this._bumpDisplacmentScale.value = v;
-    }
+    /**
+     * 集中管理所有可配置参数。
+     * 外部可直接读写：`fluidMat.params.set("splatForce", -0.1)`
+     */
+    readonly params: FluidSimParams;
 
     /**
      * Color
@@ -459,11 +427,6 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
     get dataTexture() {
         return this.currentRT;
     }
-
-    velocityDissipation = 0.283;
-    densityDissipation = 0.2;
-    pressureIterations = 39;
-    actAsSmoke = true;
 
     private scroll: ScrollShader;
     private splat: SplatShader;
@@ -491,6 +454,9 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
         this.uMaxSpeed = uniform(settings?.maxSpeed ?? (1/10));
 
         this.raycaster = new Raycaster();
+
+        // ─── 初始化参数管理器 ─────────────────────────────
+        this.params = new FluidSimParams();
 
         const rt = () => {
             const txt = new StorageTexture(textureWidth, textureHeight); 
@@ -546,6 +512,35 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
         this.renderMaterial = (material, target) => {
             material.renderBind(renderer, target);
         }
+
+        // ─── 绑定参数到 shader uniforms / 材质属性 ─────────
+        this.params.bind("splatForce", {
+            get: () => this.splat.splatForce.value,
+            set: (v: number) => { this.splat.splatForce.value = v; },
+        });
+        this.params.bind("splatThickness", {
+            get: () => this.splat.thickness.value,
+            set: (v: number) => { this.splat.thickness.value = v; },
+        });
+        this.params.bind("vorticityInfluence", {
+            get: () => this.curl.vorticityInfluence.value,
+            set: (v: number) => { this.curl.vorticityInfluence.value = v; },
+        });
+        this.params.bind("swirlIntensity", {
+            get: () => this.vorticity.curl.value,
+            set: (v: number) => { this.vorticity.curl.value = v; },
+        });
+        this.params.bind("pressureDecay", {
+            get: () => this.clear.decay.value,
+            set: (v: number) => { this.clear.decay.value = v; },
+        });
+        this.params.bind("displacementScale", {
+            get: () => this._bumpDisplacmentScale.value,
+            set: (v: number) => { this._bumpDisplacmentScale.value = v; },
+        });
+        this.params.bind("velocityDissipation", { get: () => this.params.get("velocityDissipation"), set: () => {} });
+        this.params.bind("densityDissipation", { get: () => this.params.get("densityDissipation"), set: () => {} });
+        this.params.bind("pressureIterations", { get: () => this.params.get("pressureIterations"), set: () => {} });
         //#endregion
         //--------------------------------------------------------------------------------------------------------------------------------------
 
@@ -787,8 +782,6 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
 
     }
 
-    ccc = true;
-
     update(delta: number, mesh: Mesh) {
         this.t += delta;
 
@@ -819,7 +812,7 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
         this.blit(this.clear);
 
         // 6. calculates and updates pressure 
-        for (let i = 0; i < this.pressureIterations; i++) {
+        for (let i = 0; i < this.params.get("pressureIterations"); i++) {
             this.blit(this.pressure);
         }
 
@@ -830,13 +823,13 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
         this.advect.delta.value = delta;
         this.advect.uSource.value = this.currentRT;
         this.advect.sourceIsVelocity.value = 1;
-        this.advect.dissipation.value = this.velocityDissipation;
+        this.advect.dissipation.value = this.params.get("velocityDissipation");
         this.blit(this.advect);
 
         // 8. Advect dye / color
         this.advect.uSource.value = this.dyeRT;
         this.advect.sourceIsVelocity.value = 0;
-        this.advect.dissipation.value = this.densityDissipation;
+        this.advect.dissipation.value = this.params.get("densityDissipation");
         this.blitDye(this.advect);
 
         // restore renderer to original target... 
@@ -846,55 +839,14 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
     }
 
     addDebugPanelFolder(gui: GUI, name = "Fluid Material") {
-
-        const panel = gui.addFolder(name);
-
-        panel.add(this as Record<string, any>, "splatForce", -.5, .5);
-        panel.add(this as Record<string, any>, "splatThickness", 0.001, 1);
-        panel.add(this as Record<string, any>, "vorticityInfluence", 0.1, 1);
-        panel.add(this as Record<string, any>, "swirlIntensity", 1, 100);
-        panel.add(this as Record<string, any>, "pressureDecay", 0, 1);
-        panel.add(this as Record<string, any>, "velocityDissipation", 0, 1);
-        panel.add(this as Record<string, any>, "densityDissipation", 0, 1);
-        panel.add(this as Record<string, any>, "bumpDisplacmentScale", -1, 1);
-        panel.add(this as Record<string, any>, "pressureIterations", 1, 100, 1);
-
-        panel.add({
-            copySettings: () => {
-
-                const settings = {
-                    splatForce: this.splatForce,
-                    splatThickness: this.splatThickness,
-                    vorticityInfluence: this.vorticityInfluence,
-                    swirlIntensity: this.swirlIntensity,
-                    pressureDecay: this.pressureDecay,
-                    velocityDissipation: this.velocityDissipation,
-                    densityDissipation: this.densityDissipation,
-                    bumpDisplacmentScale: this.bumpDisplacmentScale,
-                    pressureIterations: this.pressureIterations,
-                }
-
-                navigator.clipboard.writeText(JSON.stringify(settings, null, 2));
-
-            }
-        }, "copySettings");
-
-        return panel;
+        return this.params.addDebugPanel(gui, name);
     }
 
     /**
      * Restore values previously copied from the debug panel...
      * @see `addDebugPanelFolder`
      */
-    setSettings(s: Settings) {
-        this.splatForce = s.splatForce;
-        this.splatThickness = s.splatThickness;
-        this.vorticityInfluence = s.vorticityInfluence;
-        this.swirlIntensity = s.swirlIntensity;
-        this.pressureDecay = s.pressureDecay;
-        this.velocityDissipation = s.velocityDissipation;
-        this.densityDissipation = s.densityDissipation;
-        this.bumpDisplacmentScale = s.bumpDisplacmentScale;
-        this.pressureIterations = s.pressureIterations;
+    setSettings(s: Partial<Record<string, number>>) {
+        this.params.applySettings(s);
     }
 }

@@ -94,7 +94,7 @@ fluidMat.setSettings({
     "pressureDecay": 0.312,
     "velocityDissipation": 0.283,
     "densityDissipation": 0.68,
-    "bumpDisplacmentScale": 0.0316,
+    "displacementScale": 0.0316,
     "pressureIterations": 39
 })
 
