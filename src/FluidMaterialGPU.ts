@@ -26,6 +26,7 @@ SOFTWARE.
 import GUI from "three/examples/jsm/libs/lil-gui.module.min.js";
 import { NodeRepresentation, storage, abs, add, clamp, Continue, cross, distance, dot, Fn, If, instanceIndex, length, Loop, max, mix, modelNormalMatrix, mul, normalGeometry, normalize, positionLocal, smoothstep, texture, textureStore, uniform, uv, vec2, vec3, vec4, type ShaderNodeObject } from "three/tsl";
 import { Color, ComputeNode, FloatType, Mesh, MeshPhysicalNodeMaterial, Node, Object3D, Raycaster, StorageBufferAttribute, StorageTexture, Texture, TextureNode, UniformNode, Vector2, Vector3, WebGPURenderer, type ColorRepresentation } from "three/webgpu";
+import { FluidParams, FLUID_GPU_PARAM_SCHEMA, type FluidParamChangeListener, type FluidGPUParamKey, type FluidGPUSettings } from "./FluidParams";
 
 type Sampler2D = ShaderNodeObject<TextureNode>;
 type NumberUniform = ShaderNodeObject<UniformNode<number>>;
@@ -350,17 +351,7 @@ export class TrackedObject {
 }
 
 
-type Settings = {
-    splatForce: number;
-    splatThickness: number;
-    vorticityInfluence: number;
-    swirlIntensity: number;
-    pressureDecay: number;
-    velocityDissipation: number;
-    densityDissipation: number;
-    bumpDisplacmentScale: number;
-    pressureIterations: number;
-};
+type Settings = FluidGPUSettings;
 
 type FluidMaterialSettings = {
 
@@ -381,6 +372,16 @@ type FluidMaterialSettings = {
 }
 
 
+/**
+ * Declaration merging: every parameter declared in {@link FLUID_GPU_PARAM_SCHEMA}
+ * is exposed as a `number` accessor on the material. The accessors themselves
+ * are installed at runtime by {@link FluidParams.install}. The merge is
+ * intentional (it is how the auto-generated accessors get their types).
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/no-unsafe-declaration-merging
+export interface FluidMaterialGPU extends Record<FluidGPUParamKey, number> {}
+
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
 
     private _bumpDisplacmentScale = uniform(0.1);
@@ -420,31 +421,8 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
     private renderMaterial: (material: ComputeShader, target: Texture) => void;
 
 
-    get splatForce() {
-        return this.splat.splatForce.value;
-    }
-    set splatForce(v: number) {
-        this.splat.splatForce.value = v;
-    }
-
-    get splatThickness() { return this.splat.thickness.value }
-    set splatThickness(v: number) { this.splat.thickness.value = v }
-    get vorticityInfluence() { return this.curl.vorticityInfluence.value }
-    set vorticityInfluence(v: number) { this.curl.vorticityInfluence.value = v }
-
-    get swirlIntensity() { return this.vorticity.curl.value }
-    set swirlIntensity(v: number) { this.vorticity.curl.value = v }
-
-    get pressureDecay() { return this.clear.decay.value }
-    set pressureDecay(v: number) { this.clear.decay.value = v }
-
-    get bumpDisplacmentScale() {
-        return this._bumpDisplacmentScale.value;
-    }
-
-    set bumpDisplacmentScale(v: number) {
-        this._bumpDisplacmentScale.value = v;
-    }
+    /** Centralized, validated, auto-mapped configuration (see {@link FluidParams}). */
+    private params!: FluidParams<FluidGPUParamKey>;
 
     /**
      * Color
@@ -460,9 +438,8 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
         return this.currentRT;
     }
 
-    velocityDissipation = 0.283;
-    densityDissipation = 0.2;
-    pressureIterations = 39;
+    // velocityDissipation / densityDissipation / pressureIterations are tunable
+    // params; they live in `this.params` and are read via the installed accessors.
     actAsSmoke = true;
 
     private scroll: ScrollShader;
@@ -587,6 +564,19 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
             this.emissiveNode = maxChannel.pow(3);
         }
 
+        // Centralized parameters: defaults/ranges/validation come from the schema,
+        // bindings below just say where each value lives inside the shader graph.
+        // Params without a binding (dissipations, iterations) are read straight
+        // from the store in `update()`.
+        this.params = new FluidParams<FluidGPUParamKey>(FLUID_GPU_PARAM_SCHEMA, {
+            splatForce:          v => { this.splat.splatForce.value = v; },
+            splatThickness:      v => { this.splat.thickness.value = v; },
+            vorticityInfluence:  v => { this.curl.vorticityInfluence.value = v; },
+            swirlIntensity:      v => { this.vorticity.curl.value = v; },
+            pressureDecay:       v => { this.clear.decay.value = v; },
+            bumpDisplacmentScale: v => { this._bumpDisplacmentScale.value = v; },
+        });
+        this.params.install(this);
     }
 
     /**
@@ -849,33 +839,12 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
 
         const panel = gui.addFolder(name);
 
-        panel.add(this as Record<string, any>, "splatForce", -.5, .5);
-        panel.add(this as Record<string, any>, "splatThickness", 0.001, 1);
-        panel.add(this as Record<string, any>, "vorticityInfluence", 0.1, 1);
-        panel.add(this as Record<string, any>, "swirlIntensity", 1, 100);
-        panel.add(this as Record<string, any>, "pressureDecay", 0, 1);
-        panel.add(this as Record<string, any>, "velocityDissipation", 0, 1);
-        panel.add(this as Record<string, any>, "densityDissipation", 0, 1);
-        panel.add(this as Record<string, any>, "bumpDisplacmentScale", -1, 1);
-        panel.add(this as Record<string, any>, "pressureIterations", 1, 100, 1);
+        // Controls are generated automatically from the parameter schema.
+        this.params.addToGUI(panel);
 
         panel.add({
             copySettings: () => {
-
-                const settings = {
-                    splatForce: this.splatForce,
-                    splatThickness: this.splatThickness,
-                    vorticityInfluence: this.vorticityInfluence,
-                    swirlIntensity: this.swirlIntensity,
-                    pressureDecay: this.pressureDecay,
-                    velocityDissipation: this.velocityDissipation,
-                    densityDissipation: this.densityDissipation,
-                    bumpDisplacmentScale: this.bumpDisplacmentScale,
-                    pressureIterations: this.pressureIterations,
-                }
-
-                navigator.clipboard.writeText(JSON.stringify(settings, null, 2));
-
+                navigator.clipboard.writeText(JSON.stringify(this.getSettings(), null, 2));
             }
         }, "copySettings");
 
@@ -883,18 +852,27 @@ export class FluidMaterialGPU extends MeshPhysicalNodeMaterial {
     }
 
     /**
-     * Restore values previously copied from the debug panel...
+     * Subscribe to parameter changes (preset switching, animation, ...).
+     * Returns an unsubscribe function.
+     */
+    onParamsChange(listener: FluidParamChangeListener<FluidGPUParamKey>) {
+        return this.params.onChange(listener);
+    }
+
+    /**
+     * Serialize the current parameter values (used by the copy button and for
+     * building presets).
+     */
+    getSettings(): Settings {
+        return this.params.snapshot();
+    }
+
+    /**
+     * Restore values previously copied from the debug panel. Every value is
+     * validated on the way in.
      * @see `addDebugPanelFolder`
      */
-    setSettings(s: Settings) {
-        this.splatForce = s.splatForce;
-        this.splatThickness = s.splatThickness;
-        this.vorticityInfluence = s.vorticityInfluence;
-        this.swirlIntensity = s.swirlIntensity;
-        this.pressureDecay = s.pressureDecay;
-        this.velocityDissipation = s.velocityDissipation;
-        this.densityDissipation = s.densityDissipation;
-        this.bumpDisplacmentScale = s.bumpDisplacmentScale;
-        this.pressureIterations = s.pressureIterations;
+    setSettings(s: Partial<Settings>) {
+        this.params.apply(s);
     }
 }

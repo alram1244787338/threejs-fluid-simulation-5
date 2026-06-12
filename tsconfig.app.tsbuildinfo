@@ -1,1 +1,1 @@
-{"root":["./src/FluidV3Material.ts","./src/main.tsx","./src/vite-env.d.ts"],"version":"5.8.3"}
+{"root":["./src/fluidmaterialgpu.ts","./src/fluidparams.ts","./src/fluidv3material.ts","./src/main-web-gpu.ts","./src/main-webgl.ts","./src/main.tsx","./src/vite-env.d.ts"],"version":"5.8.3"}

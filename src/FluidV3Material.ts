@@ -25,6 +25,7 @@ SOFTWARE.
 import GUI from "three/examples/jsm/libs/lil-gui.module.min.js";
 import { Color, ColorRepresentation, DataTexture, FloatType, Mesh, MeshPhysicalMaterial, Object3D, Raycaster, RGBAFormat, ShaderMaterial, Vector2, Vector3, WebGLRenderer, WebGLRenderTarget, type WebGLProgramParametersWithUniforms } from "three";
 import { FullScreenQuad } from "three/examples/jsm/Addons.js";
+import { FluidParams, FLUID_V3_PARAM_SCHEMA, type FluidParamChangeListener, type FluidV3ParamKey, type FluidV3Settings } from "./FluidParams";
 
 /**
  * R - Pressure
@@ -506,18 +507,18 @@ type TargetObject = {
 }
 
 
-type Settings = {
-  splatForce: number;
-  splatThickness: number;
-  vorticityInfluence: number;
-  swirlIntensity: number;
-  pressure: number;
-  velocityDissipation: number;
-  densityDissipation: number;
-  displacementScale: number;
-  pressureIterations: number;
-};
+type Settings = FluidV3Settings;
 
+/**
+ * Declaration merging: every parameter declared in {@link FLUID_V3_PARAM_SCHEMA}
+ * is exposed as a `number` accessor on the material. The accessors themselves
+ * are installed at runtime by {@link FluidParams.install}. The merge is
+ * intentional (it is how the auto-generated accessors get their types).
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type, @typescript-eslint/no-unsafe-declaration-merging
+export interface FluidV3Material extends Record<FluidV3ParamKey, number> {}
+
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
 export class FluidV3Material extends MeshPhysicalMaterial {
 
     /**
@@ -581,8 +582,11 @@ export class FluidV3Material extends MeshPhysicalMaterial {
     private clearShader:ClearShader;
     private pressureShader:PressureShader;
     private gradientShader:GradientSubtractShader;
-    private advectionShader:AdvectVelocityShader; 
+    private advectionShader:AdvectVelocityShader;
     private supportLinearFiltering:boolean;
+
+    /** Centralized, validated, auto-mapped configuration (see {@link FluidParams}). */
+    private params!:FluidParams<FluidV3ParamKey>;
 
     private t = 0;
 
@@ -655,34 +659,33 @@ export class FluidV3Material extends MeshPhysicalMaterial {
         this.pressureShader = new PressureShader(texel);
         this.gradientShader = new GradientSubtractShader(texel);
         this.advectionShader = new AdvectVelocityShader(texel, texel, this.supportLinearFiltering? false : true );
+
+        // Centralized parameters: defaults/ranges/validation come from the schema,
+        // bindings below just say where each value lives inside the shader graph.
+        // Params without a binding (dissipations, displacementScale, iterations)
+        // are read straight from the store in `update()` / by three.js.
+        this.params = new FluidParams<FluidV3ParamKey>( FLUID_V3_PARAM_SCHEMA, {
+            splatForce:         v => { this.splat.uniforms.splatForce.value = v; },
+            splatThickness:     v => { this.splat.uniforms.thickness.value = v; },
+            vorticityInfluence: v => { this.curl.uniforms.vorticityInfluence.value = v; },
+            swirlIntensity:     v => { this.vorticity.uniforms.curl.value = v; },
+            pressure:           v => { this.clearShader.uniforms.value.value = v; },
+        });
+        this.params.install( this );
     }
 
 
-
-    get splatForce() {
-        return this.splat.uniforms.splatForce.value;
-    }
-    set splatForce( v:number ) {
-        this.splat.uniforms.splatForce.value = v;
-    }
-
-    get splatThickness() { return this.splat.uniforms.thickness.value }
-    set splatThickness(v:number) {  this.splat.uniforms.thickness.value=v }
-    get vorticityInfluence() { return this.curl.uniforms.vorticityInfluence.value }
-    set vorticityInfluence(v:number) {  this.curl.uniforms.vorticityInfluence.value=v }
-
-    get swirlIntensity() { return this.vorticity.uniforms.curl.value }
-    set swirlIntensity(v:number) {  this.vorticity.uniforms.curl.value=v } 
-
-    get pressure() { return this.clearShader.uniforms.value.value }
-    set pressure(v:number) {  this.clearShader.uniforms.value.value=v } 
-
-    velocityDissipation = 0.283;
-    densityDissipation = 0.138;
-    pressureIterations = 39;
 
     /**
-     * Make normals respect the displacement... 
+     * Subscribe to parameter changes (preset switching, animation, ...).
+     * Returns an unsubscribe function.
+     */
+    onParamsChange( listener:FluidParamChangeListener<FluidV3ParamKey> ) {
+        return this.params.onChange( listener );
+    }
+
+    /**
+     * Make normals respect the displacement...
      */
     override onBeforeCompile( shader: WebGLProgramParametersWithUniforms ): void {
          // Pass UV and world position to fragment shader
@@ -1035,37 +1038,19 @@ export class FluidV3Material extends MeshPhysicalMaterial {
 
         const panel = gui.addFolder(name);
 
-        panel.add( this as Record<string, any>, "splatForce", -1000, 1000 );
-        panel.add( this as Record<string, any>, "splatThickness", 0.001, 0.2 );
-        panel.add( this as Record<string, any>, "vorticityInfluence", 0.1, 1 );
-        panel.add( this as Record<string, any>, "swirlIntensity", 1, 100 );
-        panel.add( this as Record<string, any>, "pressure", 0, 1 );
-        panel.add( this as Record<string, any>, "velocityDissipation", 0, 1 );
-        panel.add( this as Record<string, any>, "densityDissipation", 0, 1 );
-        panel.add( this as Record<string, any>, "displacementScale", -.1, .1 );
-        panel.add( this as Record<string, any>, "pressureIterations", 1, 100, 1 );
+        // Controls are generated automatically from the parameter schema.
+        this.params.addToGUI( panel );
+
         panel.add( {
             copySettings: ()=>{
-
-                const settings = {
-                    splatForce: this.splatForce,
-                    splatThickness: this.splatThickness,
-                    vorticityInfluence: this.vorticityInfluence,
-                    swirlIntensity: this.swirlIntensity,
-                    pressure: this.pressure,
-                    velocityDissipation: this.velocityDissipation,
-                    densityDissipation: this.densityDissipation,
-                    displacementScale: this.displacementScale,
-                    pressureIterations: this.pressureIterations,
-                }
-
-                navigator.clipboard.writeText( JSON.stringify(settings, null, 2));
-                
+                navigator.clipboard.writeText( JSON.stringify(this.getSettings(), null, 2));
             }
         }, "copySettings" );
 
-        panel.add(this as Record<string, any>, "asSolid"); 
+        panel.add(this as Record<string, any>, "asSolid");
         panel.add(this as Record<string, any>, "asSmoke");
+
+        return panel;
     }
 
     asSolid() {
@@ -1081,18 +1066,19 @@ export class FluidV3Material extends MeshPhysicalMaterial {
     }
 
     /**
-     * Restore values previously copied from the debug panel...
+     * Serialize the current parameter values (used by the copy button and for
+     * building presets).
+     */
+    getSettings():Settings {
+        return this.params.snapshot();
+    }
+
+    /**
+     * Restore values previously copied from the debug panel. Every value is
+     * validated on the way in.
      * @see `addDebugPanelFolder`
      */
-    setSettings( s:Settings ) {
-        this.splatForce = s.splatForce;
-        this.splatThickness = s.splatThickness;
-        this.vorticityInfluence = s.vorticityInfluence;
-        this.swirlIntensity = s.swirlIntensity;
-        this.pressure = s.pressure;
-        this.velocityDissipation = s.velocityDissipation;
-        this.densityDissipation = s.densityDissipation;
-        this.displacementScale = s.displacementScale;
-        this.pressureIterations = s.pressureIterations; 
+    setSettings( s:Partial<Settings> ) {
+        this.params.apply( s );
     }
 }
